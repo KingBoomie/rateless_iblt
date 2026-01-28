@@ -1,0 +1,335 @@
+use proptest::prelude::*;
+use riblt::RatelessIBLT;
+use riblt::Symbol;
+use std::collections::HashSet;
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct TestSymbol(pub u64);
+
+impl Symbol for TestSymbol {
+    const BYTE_LEN: usize = 8;
+    fn encode_into(&self, buffer: &mut [u8]) {
+        buffer.copy_from_slice(&self.0.to_le_bytes());
+    }
+    fn decode_from(bytes: &[u8]) -> Self {
+        TestSymbol(u64::from_le_bytes(bytes.try_into().unwrap()))
+    }
+}
+
+prop_compose! {
+    fn arb_symbol()(val in any::<u64>()) -> TestSymbol {
+        TestSymbol(val)
+    }
+}
+
+prop_compose! {
+    fn arb_symbol_vec(max_len: usize)(vec in proptest::collection::vec(arb_symbol(), 0..max_len)) -> Vec<TestSymbol> {
+        vec
+    }
+}
+
+proptest! {
+
+    #![proptest_config(ProptestConfig {
+            // max_local_rejects: 10000,
+            // max_global_rejects: 10000,
+            // verbose: 1,  // See progress
+            failure_persistence: None,
+            max_shrink_iters: 2048,
+            // timeout: 10000,
+            ..ProptestConfig::default()
+        })]
+
+    #[test]
+    fn test_linearity_of_addition(
+        set_a in arb_symbol_vec(50),
+        set_b in arb_symbol_vec(50)
+    ) {
+        // Linearity should hold regardless of decoding success, 
+        // but we use a large size to ensure we can inspect the results cleanly.
+        let size = 500; 
+        let mut iblt_a = RatelessIBLT::new();
+        let mut iblt_b = RatelessIBLT::new();
+        let mut iblt_combined_immed = RatelessIBLT::new();
+
+        for x in &set_a { iblt_a.add_symbol(x, size); }
+        for x in &set_b { iblt_b.add_symbol(x, size); }
+        
+        for x in set_a.iter().chain(set_b.iter()) {
+            iblt_combined_immed.add_symbol(x, size);
+        }
+
+        let mut iblt_combined_algebra = iblt_a.clone();
+        iblt_combined_algebra.combine_assign(&iblt_b);
+
+        iblt_combined_algebra.subtract_assign(&iblt_combined_immed);
+        let (local, remote) = iblt_combined_algebra.decode_all();
+        
+        prop_assert!(local.is_empty(), "Local artifacts found (Linearity check)");
+        prop_assert!(remote.is_empty(), "Remote artifacts found (Linearity check)");
+    }
+
+    #[test]
+    fn test_set_difference_decoding(
+        mut set_a in arb_symbol_vec(30),
+        mut set_b in arb_symbol_vec(30)
+    ) {
+        // 1. Enforce Set Semantics (Deduplicate inputs)
+        // IBLTs are multisets by default. To test Set Difference, we must strictly 
+        // provide sets, otherwise count=2 (duplicate) looks like a collision.
+        set_a.sort_by_key(|s| s.0); set_a.dedup();
+        set_b.sort_by_key(|s| s.0); set_b.dedup();
+
+        let set_a_hash: HashSet<_> = set_a.iter().cloned().collect();
+        let set_b_hash: HashSet<_> = set_b.iter().cloned().collect();
+
+        // 2. Calculate Expected Difference
+        let diff_a_b: Vec<_> = set_a_hash.difference(&set_b_hash).collect();
+        let diff_b_a: Vec<_> = set_b_hash.difference(&set_a_hash).collect();
+        let total_diff = diff_a_b.len() + diff_b_a.len();
+
+        // 3. Robust Sizing Strategy
+        // Heavy-tail distributions have high variance for small N.
+        // We set a minimum floor of 300 to effectively eliminate the 
+        // "bad RNG roll" where all items jump past the buffer.
+        let size = if total_diff < 20 {
+             300 
+        } else {
+             (total_diff * 3) + 50
+        };
+
+        let mut iblt_a = RatelessIBLT::new();
+        let mut iblt_b = RatelessIBLT::new();
+
+        for x in &set_a { iblt_a.add_symbol(x, size); }
+        for x in &set_b { iblt_b.add_symbol(x, size); }
+
+        // 4. Perform Subtraction and Decode
+        iblt_a.subtract_assign(&iblt_b);
+        let (unique_a, unique_b) = iblt_a.decode_all();
+
+        let res_a_hash: HashSet<_> = unique_a.into_iter().collect();
+        let res_b_hash: HashSet<_> = unique_b.into_iter().collect();
+
+        let expected_a: HashSet<_> = set_a_hash.difference(&set_b_hash).cloned().collect();
+        let expected_b: HashSet<_> = set_b_hash.difference(&set_a_hash).cloned().collect();
+
+        prop_assert_eq!(&res_a_hash, &expected_a, "Decoded Local (A-B) mismatch");
+        prop_assert_eq!(&res_b_hash, &expected_b, "Decoded Remote (B-A) mismatch");
+    }
+
+    #[test]
+    fn test_subtraction_antisymmetry(
+        set_a in arb_symbol_vec(20),
+        set_b in arb_symbol_vec(20)
+    ) {
+        // Enforce large enough size to ensure decoding succeeds for the check
+        let size = 300; 
+        
+        // Note: We don't strictly need to dedup here for the property to hold 
+        // (A - B == -(B - A) is true for multisets too), but decoding logic 
+        // expects singleton counts (1 or -1), so duplicates might cause peel failures.
+        // For consistency, we rely on the decoder's best effort. 
+        // If decoding is partial, the partial results should still be symmetric.
+
+        let mut iblt_a = RatelessIBLT::new();
+        let mut iblt_b = RatelessIBLT::new();
+
+        for x in &set_a { iblt_a.add_symbol(x, size); }
+        for x in &set_b { iblt_b.add_symbol(x, size); }
+
+        // Path 1: A - B
+        let mut diff_1 = iblt_a.clone();
+        diff_1.subtract_assign(&iblt_b);
+        let (local_1, remote_1) = diff_1.decode_all();
+
+        // Path 2: B - A
+        let mut diff_2 = iblt_b.clone();
+        diff_2.subtract_assign(&iblt_a);
+        let (local_2, remote_2) = diff_2.decode_all();
+
+        // Symmetry Check
+        let s1: HashSet<_> = local_1.iter().collect();
+        let s2: HashSet<_> = remote_2.iter().collect();
+        prop_assert_eq!(s1, s2, "A-B local should equal B-A remote");
+
+        let s3: HashSet<_> = remote_1.iter().collect();
+        let s4: HashSet<_> = local_2.iter().collect();
+        prop_assert_eq!(s3, s4, "A-B remote should equal B-A local");
+    }
+}
+
+// Additional property-based tests
+proptest! {
+    #![proptest_config(ProptestConfig {
+        failure_persistence: None,
+        max_shrink_iters: 2048,
+        .. ProptestConfig::default()
+    })]
+
+    /// Test that adding and then "removing" the same symbol results in empty decode
+    #[test]
+    fn test_add_then_subtract_same_set(
+        set in arb_symbol_vec(30)
+    ) {
+        let size = 300;
+        let mut iblt = RatelessIBLT::new();
+        
+        // Add all symbols
+        for x in &set {
+            iblt.add_symbol(x, size);
+        }
+        
+        // Subtract all symbols (by adding with negative count via subtraction)
+        let mut iblt_neg = RatelessIBLT::new();
+        for x in &set {
+            iblt_neg.add_symbol(x, size);
+        }
+        
+        iblt.subtract_assign(&iblt_neg);
+        let (local, remote) = iblt.decode_all();
+        
+        prop_assert!(local.is_empty(), "Should have no local symbols after A - A");
+        prop_assert!(remote.is_empty(), "Should have no remote symbols after A - A");
+    }
+
+    /// Test that empty set differences work correctly
+    #[test]
+    fn test_empty_set_difference(
+        set in arb_symbol_vec(30)
+    ) {
+        let size = 300;
+        let mut iblt_a = RatelessIBLT::new();
+        let mut iblt_b = RatelessIBLT::new();
+        
+        // A has symbols, B is empty
+        for x in &set {
+            iblt_a.add_symbol(x, size);
+        }
+        
+        // A - B should give us all of A
+        iblt_a.subtract_assign(&iblt_b);
+        let (local, remote) = iblt_a.decode_all();
+        
+        let expected: HashSet<_> = set.into_iter().collect();
+        let actual: HashSet<_> = local.into_iter().collect();
+        
+        prop_assert!(remote.is_empty(), "Should have no remote symbols when B is empty");
+        prop_assert_eq!(actual, expected, "A - empty should equal A");
+    }
+
+    /// Test that identical sets produce empty difference
+    #[test]
+    fn test_identical_sets(
+        mut set in arb_symbol_vec(30)
+    ) {
+        // Deduplicate to ensure set semantics
+        set.sort_by_key(|s| s.0);
+        set.dedup();
+        
+        let size = 300;
+        let mut iblt_a = RatelessIBLT::new();
+        let mut iblt_b = RatelessIBLT::new();
+        
+        for x in &set {
+            iblt_a.add_symbol(x, size);
+            iblt_b.add_symbol(x, size);
+        }
+        
+        iblt_a.subtract_assign(&iblt_b);
+        let (local, remote) = iblt_a.decode_all();
+        
+        prop_assert!(local.is_empty(), "Identical sets should have no A-B difference");
+        prop_assert!(remote.is_empty(), "Identical sets should have no B-A difference");
+    }
+
+    /// Test commutativity of combine_assign
+    #[test]
+    fn test_combine_assign_commutativity(
+        set_a in arb_symbol_vec(20),
+        set_b in arb_symbol_vec(20)
+    ) {
+        let size = 300;
+        let mut iblt_a1 = RatelessIBLT::new();
+        let mut iblt_a2 = RatelessIBLT::new();
+        let mut iblt_b = RatelessIBLT::new();
+        
+        for x in &set_a {
+            iblt_a1.add_symbol(x, size);
+            iblt_a2.add_symbol(x, size);
+        }
+        for x in &set_b {
+            iblt_b.add_symbol(x, size);
+        }
+        
+        // A + B
+        iblt_a1.combine_assign(&iblt_b);
+        
+        // B + A (simulated by adding to B)
+        let mut iblt_b_copy = iblt_b.clone();
+        iblt_b_copy.combine_assign(&iblt_a2);
+        
+        // Both should decode to the same union
+        let (local1, _) = iblt_a1.decode_all();
+        let (local2, _) = iblt_b_copy.decode_all();
+        
+        let set1: HashSet<_> = local1.into_iter().collect();
+        let set2: HashSet<_> = local2.into_iter().collect();
+        
+        // Note: Due to collisions, decoding might be partial, but whatever 
+        // we decode should be consistent
+        prop_assert_eq!(set1, set2, "A+B should equal B+A");
+    }
+
+    /// Test that single symbol can be decoded
+    #[test]
+    fn test_single_symbol_roundtrip(val in any::<u64>()) {
+        let size = 100;
+        let mut iblt = RatelessIBLT::new();
+        let symbol = TestSymbol(val);
+        
+        iblt.add_symbol(&symbol, size);
+        
+        let (local, remote) = iblt.decode_all();
+        
+        prop_assert_eq!(local.len(), 1, "Should decode exactly one symbol");
+        prop_assert!(remote.is_empty(), "Should have no remote symbols");
+        prop_assert_eq!(local[0].clone(), symbol, "Decoded symbol should match original");
+    }
+
+    /// Test associativity: (A + B) + C == A + (B + C)
+    #[test]
+    fn test_combine_assign_associativity(
+        set_a in arb_symbol_vec(15),
+        set_b in arb_symbol_vec(15),
+        set_c in arb_symbol_vec(15)
+    ) {
+        let size = 400;
+        
+        let mut iblt_a = RatelessIBLT::new();
+        let mut iblt_b = RatelessIBLT::new();
+        let mut iblt_c = RatelessIBLT::new();
+        
+        for x in &set_a { iblt_a.add_symbol(x, size); }
+        for x in &set_b { iblt_b.add_symbol(x, size); }
+        for x in &set_c { iblt_c.add_symbol(x, size); }
+        
+        // (A + B) + C
+        let mut left = iblt_a.clone();
+        left.combine_assign(&iblt_b);
+        left.combine_assign(&iblt_c);
+        
+        // A + (B + C)
+        let mut right = iblt_b.clone();
+        right.combine_assign(&iblt_c);
+        right.combine_assign(&iblt_a);
+        
+        // Both should represent the same multiset
+        // Verify by subtracting one from the other
+        left.subtract_assign(&right);
+        let (local, remote) = left.decode_all();
+        
+        prop_assert!(local.is_empty(), "(A+B)+C should equal A+(B+C)");
+        prop_assert!(remote.is_empty(), "(A+B)+C should equal A+(B+C)");
+    }
+}
