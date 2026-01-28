@@ -12,6 +12,15 @@ https://arxiv.org/abs/2402.02668
 
 Please note that this crate does not look for duplicates in the set. Duplicate items cannot be peeled out of the RIBLT.
 
+## Known Limitations & Failure Cases
+
+While monotonically increasing inputs (like timestamps) are now handled correctly via random mapping jitter, there are known edge cases where reconciliation may fail:
+
+1. **Hash Collisions**: The current implementation uses 64-bit hashes. While unlikely for small sets, collisions will prevent decoding.
+2. **Heavy-Tail Overlap**: In property-based testing (`additional_tests::test_set_difference_decoding`), specific random inputs can still produce "stopping sets" where symbols map to identical or heavily overlapping blocks that cannot be peeled, leading to incomplete decoding. The library makes a best-effort attempt to avoid this with randomized mapping, but it is not formally guaranteed to succeed for every possible input combination, especially with small IBLT sizes relative to the set difference complexity.
+
+If you encounter `assertion failed: (left == right)` errors during property testing, it indicates a specific random set combination that the current peeling solver could not resolve. Increasing the IBLT size or retrying often resolves transient probabilistic failures.
+
 ## Glossary
 
 - Symbol: An item in the set
