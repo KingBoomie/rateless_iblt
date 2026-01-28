@@ -6,10 +6,12 @@ extern crate alloc;
 // mod encoder;
 mod encoder3;
 mod mapping;
+mod ringbuffer;
 mod symbol;
 
 pub use encoder3::{PeelableResult, RatelessIBLT};
 pub use mapping::RandomMapping;
+pub use ringbuffer::IndexQueue;
 pub use symbol::Symbol;
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]

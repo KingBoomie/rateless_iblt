@@ -9,6 +9,7 @@ use alloc::vec::Vec;
 
 use crate::RibltError;
 use crate::mapping::RandomMapping;
+use crate::ringbuffer::IndexQueue;
 use crate::symbol::Symbol;
 use serde_big_array::BigArray;
 
@@ -223,66 +224,28 @@ impl<T: Symbol, const NUM_BLOCKS: usize, const SUMS_BYTES: usize>
         let mut local_count = 0;
         let mut remote_count = 0;
 
-        // Stack-allocated queue for decodable blocks.
-        // Size limitation: Must be <= NUM_BLOCKS.
-        // Users must ensure stack is large enough for [usize; NUM_BLOCKS].
-        // If NUM_BLOCKS is large (e.g. > 1024), this consumes stack.
-        // Warning documented in Security section.
         if NUM_BLOCKS == 0 {
             return Ok((0, 0));
         }
 
-        let mut queue = [0usize; NUM_BLOCKS];
-        let mut queue_head = 0; // write
-        let mut queue_tail = 0; // read
-        let mut queue_len = 0;
-        let mut in_queue = [false; NUM_BLOCKS];
+        // Stack-allocated queue.
+        // Note: Function stack usage is approx sizeof(usize) * NUM_BLOCKS + sizeof(bool) * NUM_BLOCKS
+        let mut queue = IndexQueue::<NUM_BLOCKS>::new();
 
-        // Helper to push to ring buffer
-        let push_queue = |idx: usize,
-                          q: &mut [usize; NUM_BLOCKS],
-                          h: &mut usize,
-                          l: &mut usize,
-                          in_q: &mut [bool; NUM_BLOCKS]|
-         -> Result<(), RibltError> {
-            if in_q[idx] {
-                return Ok(());
-            }
-            if *l >= NUM_BLOCKS {
-                // Safety check to prevent overflow - in practice, l <= NUM_BLOCKS
-                return Err(RibltError::QueueOverflow);
-            }
-            q[*h] = idx;
-            *h = (*h + 1) % NUM_BLOCKS;
-            *l += 1;
-            in_q[idx] = true;
-            Ok(())
-        };
-
-        // 1. Scan for decodable buckets
+        // 1. Scan for initially decodable buckets
         for i in 0..self.active_blocks {
             let c = self.counts[i];
             if c == 1 || c == -1 {
-                push_queue(
-                    i,
-                    &mut queue,
-                    &mut queue_head,
-                    &mut queue_len,
-                    &mut in_queue,
-                )?;
+                queue.push_unique(i)?;
             }
         }
 
-        while queue_len > 0 {
-            let idx = queue[queue_tail];
-            queue_tail = (queue_tail + 1) % NUM_BLOCKS;
-            queue_len -= 1;
-            in_queue[idx] = false;
-
-            // 2. Try to recover symbol
+        // 2. Process queue
+        while let Some(idx) = queue.pop() {
+            // Try to recover symbol
             let (symbol, dir) = match self.try_peel(idx) {
                 Some(res) => res,
-                None => continue, // Checksum failed or count changed
+                None => continue, // Checksum failed or count changed since enqueue
             };
 
             match dir {
@@ -302,17 +265,16 @@ impl<T: Symbol, const NUM_BLOCKS: usize, const SUMS_BYTES: usize>
                 }
             }
 
-            // 3. Re-encode and subtract from table
+            // Re-encode and subtract from table
+            // [Note: This section would be replaced by Refactor #1 in the future]
             let mapping = RandomMapping::new(&symbol);
             let encoded_hash = symbol.hash_();
 
-            // Re-encode helper using stack/scratch
             const MAX_SYM_SIZE: usize = 512;
             let mut encoded = [0u8; MAX_SYM_SIZE];
             let encoded_slice = &mut encoded[..T::BYTE_LEN];
             symbol.encode_into(encoded_slice);
 
-            // Determine arithmetic modification
             let count_delta = match dir {
                 Direction::Add => -1,
                 Direction::Remove => 1,
@@ -321,23 +283,13 @@ impl<T: Symbol, const NUM_BLOCKS: usize, const SUMS_BYTES: usize>
             for other_idx in mapping.take_while(|&idx| idx < self.active_blocks) {
                 let start = other_idx * T::BYTE_LEN;
 
-                // XOR is self-inverse: works for both adding and removing
                 Self::xor_block(&mut self.sums[start..start + T::BYTE_LEN], encoded_slice);
                 self.hashes[other_idx] ^= encoded_hash;
-
-                // Apply arithmetic update
                 self.counts[other_idx] += count_delta;
 
-                // Check if this neighbor is now decodable
                 let c = self.counts[other_idx];
                 if c == 1 || c == -1 {
-                    push_queue(
-                        other_idx,
-                        &mut queue,
-                        &mut queue_head,
-                        &mut queue_len,
-                        &mut in_queue,
-                    )?;
+                    queue.push_unique(other_idx)?;
                 }
             }
         }
