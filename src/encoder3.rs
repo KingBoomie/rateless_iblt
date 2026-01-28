@@ -13,6 +13,10 @@ use crate::ringbuffer::IndexQueue;
 use crate::symbol::Symbol;
 use serde_big_array::BigArray;
 
+/// A scratch buffer size large enough for any expected Symbol.
+/// In the future, this could be a const generic param on the struct itself.
+const SCRATCH_BUF_SIZE: usize = 512;
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum PeelableResult<T: Symbol> {
     Local(T),
@@ -51,9 +55,6 @@ pub struct RatelessIBLT<T: Symbol, const NUM_BLOCKS: usize, const SUMS_BYTES: us
 impl<T: Symbol, const NUM_BLOCKS: usize, const SUMS_BYTES: usize>
     RatelessIBLT<T, NUM_BLOCKS, SUMS_BYTES>
 {
-    /// A scratch buffer size large enough for any expected Symbol.
-    const SCRATCH_BUF_SIZE: usize = 512;
-
     pub fn new() -> Self {
         // Assert sums buffer is large enough for N blocks * symbol size.
         // In stable Rust, this is a runtime panic in new (or compile time if we used static assertions, but simple assert is fine).
@@ -103,42 +104,26 @@ impl<T: Symbol, const NUM_BLOCKS: usize, const SUMS_BYTES: usize>
             self.ensure_capacity(max_blocks - 1)?;
         }
 
-        let sym_hash = symbol.hash_();
-        // Stack allocation for encoded bytes.
-        // We need a const size for this buffer.
-        // Limitation: generic const exprs not stable to do [0u8; T::BYTE_LEN].
-        // Workaround: We use a small scratch buffer and panic if Symbol is too large?
-        // Or we rely on `encode_into` which takes a slice.
-        // For no-alloc, we can't Vec.
-        // Let's assume T::BYTE_LEN is relatively small (it usually is for IBLT symbols).
-        // Since we can't stack allocate dynamic size, and can't use T::BYTE_LEN in array decl without nightly.
-        // We will user a "safe max" buffer or ask user to provide one?
-        // Actually, if we link `no_std` with `alloc` we can use `vec!`.
-        // BUT the user asked for "no-alloc".
-        // Solution: We iterate. `xor_block` uses slices.
-        // We can't allocate a temp buffer on stack without nightly.
-        // Wait, T::BYTE_LEN is a const. We CAN do [0u8; T::BYTE_LEN] on Nightly, but not Stable.
-        // For Stable no-alloc, we might need a generic parameter `const SYM_LEN: usize` on `RatelessIBLT`?
-        // Or we pass a scratch buffer to `add_symbol`?
-        // Let's use `alloc` if available, otherwise?
-        // Since `RatelessIBLT` is `no_std` but `no_alloc` phase implies we shouldn't use `Vec`.
-        // However, `lib.rs` currently DOES extern crate alloc.
-        // User asked: "can we have all allocations static?".
-        // If we strictly follow that, we cannot use `vec!`.
-        // Let's require the user to genericize `SYM_LEN` or similar.
-        // Or we just hardcode a MAX_SYM_LEN (e.g. 256 bytes) for the scratch?
-        // Let's use a reasonable stack buffer limit for now, e.g. 1024 bytes.
-        const MAX_SYM_SIZE: usize = 512;
+        self.apply_symbol(symbol, 1, max_blocks, None)
+    }
+
+    /// Internal helper to add or remove a symbol from the IBLT.
+    fn apply_symbol(
+        &mut self,
+        symbol: &T,
+        direction: i64,
+        max_blocks: usize,
+        mut queue: Option<&mut IndexQueue<NUM_BLOCKS>>,
+    ) -> Result<(), RibltError> {
         assert!(
-            T::BYTE_LEN <= MAX_SYM_SIZE,
+            T::BYTE_LEN <= SCRATCH_BUF_SIZE,
             "Symbol too large for stack buffer"
         );
-        let mut encoded = [0u8; MAX_SYM_SIZE];
+        let mut encoded = [0u8; SCRATCH_BUF_SIZE];
         let encoded_slice = &mut encoded[..T::BYTE_LEN];
-
         symbol.encode_into(encoded_slice);
 
-        // Pass max_blocks to create hashed offset for starting position
+        let sym_hash = symbol.hash_();
         let mapping = RandomMapping::new(symbol);
 
         for block_idx in mapping.take_while(|&idx| idx < max_blocks) {
@@ -147,7 +132,14 @@ impl<T: Symbol, const NUM_BLOCKS: usize, const SUMS_BYTES: usize>
 
             Self::xor_block(&mut self.sums[start..end], encoded_slice);
             self.hashes[block_idx] ^= sym_hash;
-            self.counts[block_idx] += 1;
+            self.counts[block_idx] += direction;
+
+            if let Some(ref mut q) = queue {
+                let c = self.counts[block_idx];
+                if c == 1 || c == -1 {
+                    q.push_unique(block_idx)?;
+                }
+            }
         }
         Ok(())
     }
@@ -156,28 +148,21 @@ impl<T: Symbol, const NUM_BLOCKS: usize, const SUMS_BYTES: usize>
         &mut self,
         other: &RatelessIBLT<T, NUM_BLOCKS, SUMS_BYTES>,
     ) -> Result<(), RibltError> {
-        if other.active_blocks == 0 {
-            return Ok(());
-        }
-        self.ensure_capacity(other.active_blocks - 1)?;
-
-        // Sums are same size by type definition
-        Self::xor_block(&mut self.sums, &other.sums);
-
-        for (h_self, h_other) in self.hashes.iter_mut().zip(&other.hashes) {
-            *h_self ^= h_other;
-        }
-
-        for (c_self, c_other) in self.counts.iter_mut().zip(&other.counts) {
-            *c_self += c_other;
-        }
-        Ok(())
+        self.apply_diff(other, 1)
     }
 
     /// Subtract another IBLT from this one (Difference).
     pub fn subtract_assign(
         &mut self,
         other: &RatelessIBLT<T, NUM_BLOCKS, SUMS_BYTES>,
+    ) -> Result<(), RibltError> {
+        self.apply_diff(other, -1)
+    }
+
+    fn apply_diff(
+        &mut self,
+        other: &RatelessIBLT<T, NUM_BLOCKS, SUMS_BYTES>,
+        sign: i64,
     ) -> Result<(), RibltError> {
         if other.active_blocks == 0 {
             return Ok(());
@@ -186,13 +171,15 @@ impl<T: Symbol, const NUM_BLOCKS: usize, const SUMS_BYTES: usize>
 
         Self::xor_block(&mut self.sums, &other.sums);
 
-        for (h_self, h_other) in self.hashes.iter_mut().zip(&other.hashes) {
-            *h_self ^= h_other;
-        }
+        self.hashes
+            .iter_mut()
+            .zip(&other.hashes)
+            .for_each(|(h, oh)| *h ^= oh);
+        self.counts
+            .iter_mut()
+            .zip(&other.counts)
+            .for_each(|(c, oc)| *c += oc * sign);
 
-        for (c_self, c_other) in self.counts.iter_mut().zip(&other.counts) {
-            *c_self -= c_other;
-        }
         Ok(())
     }
 
@@ -269,32 +256,12 @@ impl<T: Symbol, const NUM_BLOCKS: usize, const SUMS_BYTES: usize>
             }
 
             // Re-encode and subtract from table
-            // [Note: This section would be replaced by Refactor #1 in the future]
-            let mapping = RandomMapping::new(&symbol);
-            let encoded_hash = symbol.hash_();
-
-            const MAX_SYM_SIZE: usize = 512;
-            let mut encoded = [0u8; MAX_SYM_SIZE];
-            let encoded_slice = &mut encoded[..T::BYTE_LEN];
-            symbol.encode_into(encoded_slice);
-
             let count_delta = match dir {
                 Direction::Add => -1,
                 Direction::Remove => 1,
             };
 
-            for other_idx in mapping.take_while(|&idx| idx < self.active_blocks) {
-                let start = other_idx * T::BYTE_LEN;
-
-                Self::xor_block(&mut self.sums[start..start + T::BYTE_LEN], encoded_slice);
-                self.hashes[other_idx] ^= encoded_hash;
-                self.counts[other_idx] += count_delta;
-
-                let c = self.counts[other_idx];
-                if c == 1 || c == -1 {
-                    queue.push_unique(other_idx)?;
-                }
-            }
+            self.apply_symbol(&symbol, count_delta, self.active_blocks, Some(&mut queue))?;
         }
 
         Ok((local_count, remote_count))
