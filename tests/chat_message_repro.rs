@@ -16,14 +16,14 @@ impl Symbol for ChatMessage {
     const BYTE_LEN: usize = 48; // 8 (ts) + 8 (auth) + 32 (content)
 
     fn encode_into(&self, buffer: &mut [u8]) {
-        // In a hot path, use byte shifting. For clarity here: bincode.
-        let bytes = bincode::serialize(self).unwrap();
+        // In a hot path, use byte shifting. For clarity here: postcard.
+        let bytes = postcard::to_stdvec(self).unwrap();
         // Pad or truncate to ensure fixed size symbol behavior
         buffer[..bytes.len()].copy_from_slice(&bytes);
     }
 
     fn decode_from(bytes: &[u8]) -> Self {
-        bincode::deserialize(bytes).expect("Corruption or version mismatch")
+        postcard::from_bytes(bytes).expect("Corruption or version mismatch")
     }
 }
 
@@ -64,34 +64,49 @@ fn chat_message_repro() {
 
     println!("Total diff: {}", total_diff);
     // Size logic from test failure
+    // define constants
+    const N: usize = 300; // Match 'size' logic (300)
+    const SUMS: usize = N * 48;
+    type ChatIBLT = RatelessIBLT<ChatMessage, N, SUMS>;
+
+    println!("Total diff: {}", total_diff);
+    // Size logic from test failure
+    // We enforce size <= N (300).
+    // The test logic used 300 for diff < 20.
+    // Total diff here is small (2 + 18 = 20ish).
     let size = if total_diff < 20 {
-        300
+        100
     } else {
-        (total_diff * 3) + 50
+        ((total_diff * 3) + 50).min(N - 1)
     };
     println!("IBLT Size: {}", size);
 
-    let mut iblt_a = RatelessIBLT::new();
-    let mut iblt_b = RatelessIBLT::new();
+    let mut iblt_a = ChatIBLT::new();
+    let mut iblt_b = ChatIBLT::new();
 
     for x in &set_a {
-        iblt_a.add_symbol(x, size);
+        iblt_a.add_symbol(x, size).unwrap();
     }
     for x in &set_b {
-        iblt_b.add_symbol(x, size);
+        iblt_b.add_symbol(x, size).unwrap();
     }
 
     println!("Subtracting B from A...");
-    iblt_a.subtract_assign(&iblt_b);
+    iblt_a.subtract_assign(&iblt_b).unwrap();
 
     println!("Decoding...");
-    let (unique_a, unique_b) = iblt_a.decode_all();
+    let mut l_buf = vec![set_a[0].clone(); N]; // Dummy
+    let mut r_buf = vec![set_a[0].clone(); N];
+    let (lc, rc) = iblt_a.decode_all(&mut l_buf, &mut r_buf).unwrap();
 
-    println!("Decoded Local count: {}", unique_a.len());
-    println!("Decoded Remote count: {}", unique_b.len());
+    println!("Decoded Local count: {}", lc);
+    println!("Decoded Remote count: {}", rc);
 
-    let res_a_hash: HashSet<_> = unique_a.into_iter().collect();
-    let res_b_hash: HashSet<_> = unique_b.into_iter().collect();
+    let local_slice = &l_buf[..lc];
+    let remote_slice = &r_buf[..rc];
+
+    let res_a_hash: HashSet<_> = local_slice.iter().cloned().collect();
+    let res_b_hash: HashSet<_> = remote_slice.iter().cloned().collect();
 
     let expected_a: HashSet<_> = set_a_hash.difference(&set_b_hash).cloned().collect();
     let expected_b: HashSet<_> = set_b_hash.difference(&set_a_hash).cloned().collect();

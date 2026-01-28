@@ -13,18 +13,16 @@ impl RandomMapping {
     const THRESHOLD_1: u64 = 3320364731362847232; // 0.18 * 2^64
     const THRESHOLD_2: u64 = 13650388340047260672; // (0.18 + 0.56) * 2^64
 
-    const ALPHAS: [f64; 3] = [0.11, 0.68, 0.82];
-
     pub fn new<T: Symbol>(symbol: &T) -> Self {
         let mut seed = symbol.hash_();
 
         // 1. Determine Subset (j) based on raw hash
         let alpha = if seed < Self::THRESHOLD_1 {
-            Self::ALPHAS[0]
+            ALPHAS[0]
         } else if seed < Self::THRESHOLD_2 {
-            Self::ALPHAS[1]
+            ALPHAS[1]
         } else {
-            Self::ALPHAS[2]
+            ALPHAS[2]
         };
 
         // 2. Strong Seeding (SplitMix64-style mixer)
@@ -84,8 +82,6 @@ impl Iterator for RandomMapping {
         // Convert back to index: i = (t - 1) / alpha
         let next_idx_float = (t_next - 1.0) / self.alpha;
 
-        // Enforce STRICT monotonicity
-        // If the gap is small (< 1.0), force a step of 1.
         let mut next_idx = next_idx_float as u64;
         if next_idx <= self.last_idx {
             // Fix: Add random hop (1..5 steps) to break identical monotonic sequences
@@ -103,6 +99,9 @@ impl Iterator for RandomMapping {
         }
     }
 }
+
+// Internal density constants
+const ALPHAS: [f64; 3] = [0.08, 0.4, 0.6];
 
 #[cfg(test)]
 mod tests {
