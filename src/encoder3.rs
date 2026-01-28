@@ -51,6 +51,9 @@ pub struct RatelessIBLT<T: Symbol, const NUM_BLOCKS: usize, const SUMS_BYTES: us
 impl<T: Symbol, const NUM_BLOCKS: usize, const SUMS_BYTES: usize>
     RatelessIBLT<T, NUM_BLOCKS, SUMS_BYTES>
 {
+    /// A scratch buffer size large enough for any expected Symbol.
+    const SCRATCH_BUF_SIZE: usize = 512;
+
     pub fn new() -> Self {
         // Assert sums buffer is large enough for N blocks * symbol size.
         // In stable Rust, this is a runtime panic in new (or compile time if we used static assertions, but simple assert is fine).
