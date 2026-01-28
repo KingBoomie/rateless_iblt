@@ -1,21 +1,14 @@
-# Rateless Invertible Bloom Lookup Table (RIBLT).
+this is a fork of [this rust crate](https://github.com/samWighton/rateless_iblt) for my personal experimentation. I will propbably never publish it on crates.io. one of the goals is to experiment with APIs, so this crate will quickly look quite different from the original and therefore it's probably not the effort to upstream. I also want to experiment with `![nostd]` and microcontroller support. no async support is planned, unless it turns out to be needed for MCU support. 
 
-The aim of this Rust Crate is to allow efficient set reconciliation over a network interface. This is achieved using Rateless Invertible Bloom Lookup Tables (RIBLT).
+The main algorithm here implements efficient set reconciliation. 
+
+---
+
+# Rateless Invertible Bloom Lookup Table (RIBLT).
 
 This crate is based on the paper titled 'Practical Rateless Set Reconciliation' authored by Lei Yang, Yossi Gilad, Mohammad Alizadeh.
 
 https://arxiv.org/abs/2402.02668
-
-The crate is published to crates.io here:
-
-https://crates.io/crates/riblt
-
-Docs are published here:
-
-https://docs.rs/riblt/latest/riblt/
-
-This crate does not require a particular 'set' implementation, it only requires that the set is iterable. 
-This allows the user to use any set implementation that is appropriate for their use-case, including a set read from disk.
 
 Please note that this crate does not look for duplicates in the set. Duplicate items cannot be peeled out of the RIBLT.
 
@@ -27,23 +20,6 @@ Please note that this crate does not look for duplicates in the set. Duplicate i
 
 ## Overview of what this crate gives you
 
-### RatelessIBLT
-
-A struct that is created by passing in an iterable set of symbols.
-
-It will create the RIBLT codedSymbols as needed.
-
-See the RatelessIBLT struct for more information.
-
-### UnmanagedRatelessIBLT
-
-Similar to the RatelessIBLT, but without the iterable set.
-
-This is used when we don't have access to the set that created this RIBLT.
-
-It is also used when we have 'combined' or 'collapsed' two RIBLTs together.
-
-See the UnmanagedRatelessIBLT struct for more information.
 
 ## Hash collision probability
 
@@ -86,26 +62,9 @@ Servers could share the coded symbols from the Rateless IBLT to a number of othe
 
 The repair mechanism would also handle cases of a network partition. Rateless IBLT would then be used to efficiently reconcile the differences.
 
-## Future work
+## TODO
 
-### Async and multi-threading
-
-There is currently no use of async or multi-threading in this crate. I will test the performance gains in the future.
-
-This is considered a lower priority, as I am anticipating this will be used on a server that is performing other tasks.
-
-### Performance
-
-I have not yet done any profiling, but I plan to do so.
-
-### Change Symbol to not use Vec
-
-To better support SIMD operations, I am planning to change the Symbol trait to set the type of the encoded data.
-It will be an array (rather than a Vec) of u8.
-
-## Notes
-
-Currently it is the responsibility of the calling code to recreate the struct when the set changes.
-
-
-
+[ ] new API on top of the implementation
+[ ] fix bugs unconvered by some prop tests
+[ ] ![nostd]
+[ ] performance work
