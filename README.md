@@ -64,7 +64,7 @@ The repair mechanism would also handle cases of a network partition. Rateless IB
 
 ## TODO
 
-[ ] new API on top of the implementation
-[ ] fix bugs unconvered by some prop tests
-[ ] ![nostd]
-[ ] performance work
+[ ] new API on top of the implementation    
+[ ] fix bugs unconvered by some prop tests    
+[ ] ![nostd]    
+[ ] performance work    
