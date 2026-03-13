@@ -106,13 +106,54 @@ p_bandwidth <- df %>%
   ) +
   theme_research()
 
-# --- Composite Dashboard ---
-# Using patchwork to combine into a single publication-ready figure
+# --- Performance Summary ---
+summary_stats <- df %>%
+  filter(scenario == "scale_diff") %>%
+  summarise(
+    avg_encode_us_per_element = mean(encode_time_us / diff_size, na.rm = TRUE),
+    avg_decode_us_per_element = mean(decode_time_us / diff_size, na.rm = TRUE),
+    avg_throughput_eps = mean(diff_size / ((encode_time_us + decode_time_us) / 1e6), na.rm = TRUE),
+    avg_bandwidth_byte_per_diff = mean(bandwidth_per_diff, na.rm = TRUE)
+  )
+
+# --- Timestamp for Versioning ---
+ts <- format(Sys.time(), "%Y%m%d_%H%M%S")
+
+# --- Save Plots ---
+# Individual plots for Markdown embedding
+p1_name <- sprintf("latency_scaling_%s.png", ts)
+p2_name <- sprintf("phase_transition_%s.png", ts)
+p3_name <- sprintf("bandwidth_efficiency_%s.png", ts)
+dashboard_name <- sprintf("riblt_performance_analysis_%s.png", ts)
+
+# ggsave(p1_name, p_latency, width = 7, height = 5, dpi = 300)
+# ggsave(p2_name, p_success, width = 7, height = 5, dpi = 300)
+# ggsave(p3_name, p_bandwidth, width = 7, height = 5, dpi = 300)
+
+# Composite dashboard as PNG
 layout <- (p_latency | p_success) / p_bandwidth + 
   plot_layout(heights = c(1, 0.8)) +
   plot_annotation(
     title = "RIBLT Benchmarking Analysis",
     theme = theme(plot.title = element_text(size = 18, face = "bold", hjust = 0.5))
   )
+ggsave(dashboard_name, layout, width = 12, height = 10, dpi = 300)
 
-ggsave("riblt_performance_analysis.pdf", layout, width = 12, height = 10, device = cairo_pdf)
+# --- Generate Markdown Report ---
+report_md <- sprintf("riblt_performance_analysis_%s.md", ts)
+cat(sprintf("# RIBLT Performance Analysis (%s)\n\n", format(Sys.time(), "%Y-%m-%d %H:%M:%S")), file = report_md)
+cat("## Key Metrics\n\n", file = report_md, append = TRUE)
+cat("| Metric | Value |\n", file = report_md, append = TRUE)
+cat("| :--- | :--- |\n", file = report_md, append = TRUE)
+cat(sprintf("| Avg Encode Time | %.2f μs/element |\n", summary_stats$avg_encode_us_per_element), file = report_md, append = TRUE)
+cat(sprintf("| Avg Decode Time | %.2f μs/element |\n", summary_stats$avg_decode_us_per_element), file = report_md, append = TRUE)
+cat(sprintf("| Avg Throughput | %s elements/sec |\n", format(round(summary_stats$avg_throughput_eps, 0), big.mark=",")), file = report_md, append = TRUE)
+cat(sprintf("| Avg Bandwidth | %.1f bytes/element |\n", summary_stats$avg_bandwidth_byte_per_diff), file = report_md, append = TRUE)
+cat("\n## Visualizations\n\n", file = report_md, append = TRUE)
+cat(sprintf("### Full Dashboard\n![Full Dashboard](%s)\n", dashboard_name), file = report_md, append = TRUE)
+
+# Also create/update a symlink or a copy for "latest" version
+latest_report <- "riblt_performance_analysis.md"
+file.copy(report_md, latest_report, overwrite = TRUE)
+
+message(sprintf("Summary report and plots generated successfully: %s", report_md))

@@ -33,8 +33,11 @@ pub struct RatelessIBLT<T: Symbol> {
     _marker: PhantomData<T>,
 }
 
-/// number of hashes
-const K: usize = 4;
+impl<T: Symbol> Default for RatelessIBLT<T> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 impl<T: Symbol> RatelessIBLT<T> {
     pub fn new() -> Self {

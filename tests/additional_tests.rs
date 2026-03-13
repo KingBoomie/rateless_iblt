@@ -34,9 +34,9 @@ proptest! {
             // max_local_rejects: 10000,
             // max_global_rejects: 10000,
             // verbose: 1,  // See progress
-            failure_persistence: None,
+            // failure_persistence: None,
             max_shrink_iters: 2048,
-            // timeout: 10000,
+            timeout: 10000,
             ..ProptestConfig::default()
         })]
 
@@ -162,7 +162,6 @@ proptest! {
 // Additional property-based tests
 proptest! {
     #![proptest_config(ProptestConfig {
-        failure_persistence: None,
         max_shrink_iters: 2048,
         .. ProptestConfig::default()
     })]

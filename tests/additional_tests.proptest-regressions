@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc cdce5a0b58bc3d6efb2f00708eac43c186b2d656a044cbf38d42ab92f328b4d5 # shrinks to mut set_a = [], mut set_b = [TestSymbol(12185217501232474759), TestSymbol(3652042557803270436)]
