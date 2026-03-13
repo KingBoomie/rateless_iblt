@@ -1,5 +1,9 @@
-use std::fmt::Debug;
-use std::hash::Hasher;
+use core::fmt::Debug;
+use core::hash::Hasher;
+
+#[cfg(not(feature = "std"))]
+use alloc::vec;
+
 use twox_hash::XxHash64; // Add dependency: twox-hash = "1.6"
 
 pub trait Symbol: Clone + Debug {
@@ -17,9 +21,9 @@ pub trait Symbol: Clone + Debug {
     /// distinct peers (Alice/Bob) generate identical hashes for the same symbol.
     fn hash_(&self) -> u64 {
         let mut hasher = XxHash64::with_seed(0);
-        // We use a small scratch buffer here. For max perf, 
+        // We use a small scratch buffer here. For max perf,
         // implementers might override hash_ to hash fields directly.
-        let mut buffer = vec![0u8; Self::BYTE_LEN]; 
+        let mut buffer = vec![0u8; Self::BYTE_LEN];
         self.encode_into(&mut buffer);
         hasher.write(&buffer);
         hasher.finish()
@@ -43,6 +47,8 @@ impl Symbol for SimpleSymbol {
 
     fn decode_from(bytes: &[u8]) -> Self {
         let arr: [u8; 8] = bytes.try_into().expect("Slice len must be 8");
-        SimpleSymbol { value: u64::from_le_bytes(arr) }
+        SimpleSymbol {
+            value: u64::from_le_bytes(arr),
+        }
     }
 }

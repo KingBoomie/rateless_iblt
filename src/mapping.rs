@@ -37,11 +37,14 @@ impl Iterator for RandomMapping {
         // Enforce strict monotonicity just in case
         let mut next_idx = self.last_idx + diff.ceil() as u64;
         if next_idx <= self.last_idx {
-            next_idx = self.last_idx + 1;
+            // Fix: Add random hop (1..5 steps) to break identical monotonic sequences
+            // for heavy-tail symbols that would otherwise all map to [0, 1, 2, 3...].
+            let hop = self.next_u64() % 5;
+            next_idx = self.last_idx + 1 + hop;
         }
 
         self.last_idx = next_idx;
-        
+
         if self.last_idx > (usize::MAX as u64) {
             None
         } else {
@@ -49,6 +52,9 @@ impl Iterator for RandomMapping {
         }
     }
 }
+
+// Internal density constants
+const ALPHAS: [f64; 3] = [0.08, 0.4, 0.6];
 
 #[cfg(test)]
 mod tests {
@@ -59,7 +65,7 @@ mod tests {
     fn test_heavy_tail_behavior() {
         let sym = SimpleSymbol { value: 12345 };
         let mut mapping = RandomMapping::new(&sym);
-        
+
         // Print first few indices to manually verify growth
         // Expect: rapid growth after the first few dense items
         let mut prev = 0;
@@ -75,13 +81,13 @@ mod tests {
     fn test_different_symbols_different_starts() {
         let sym1 = SimpleSymbol { value: 12345 };
         let sym2 = SimpleSymbol { value: 54321 };
-        
+
         let mut mapping1 = RandomMapping::new(&sym1);
         let mut mapping2 = RandomMapping::new(&sym2);
-        
+
         let first1 = mapping1.next().unwrap();
         let first2 = mapping2.next().unwrap();
-        
+
         // Different symbols should (with high probability) start at different positions
         // Note: collisions are possible but unlikely with 64-bit hashes
         println!("Symbol 1 starts at: {}", first1);

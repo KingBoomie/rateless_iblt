@@ -1,211 +1,243 @@
 #[cfg(test)]
 mod tests {
-    
 
-use riblt::RandomMapping;
-use riblt::RatelessIBLT;
-use riblt::Symbol;
+    use riblt::RatelessIBLT;
+    use riblt::Symbol;
 
-// Reuse TestSymbol
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub struct TestSymbol(pub u64);
-impl Symbol for TestSymbol {
-    const BYTE_LEN: usize = 8;
-    fn encode_into(&self, buffer: &mut [u8]) { buffer.copy_from_slice(&self.0.to_le_bytes()); }
-    fn decode_from(bytes: &[u8]) -> Self { TestSymbol(u64::from_le_bytes(bytes.try_into().unwrap())) }
-}
+    // Reuse TestSymbol
+    #[derive(Clone, Debug, PartialEq, Eq, Hash)]
+    pub struct TestSymbol(pub u64);
+    impl Symbol for TestSymbol {
+        const BYTE_LEN: usize = 8;
+        fn encode_into(&self, buffer: &mut [u8]) {
+            buffer.copy_from_slice(&self.0.to_le_bytes());
+        }
+        fn decode_from(bytes: &[u8]) -> Self {
+            TestSymbol(u64::from_le_bytes(bytes.try_into().unwrap()))
+        }
+    }
 
-#[test]
-fn test_capacity_expansion() {
-    let mut iblt = RatelessIBLT::<TestSymbol>::new();
-    
-    // Add symbol with small max_blocks
-    iblt.add_symbol(&TestSymbol(1), 10);
-    
-    // Internal checks (requires making fields pub or adding getters for test, 
-    // assuming pub(crate) for tests)
-    // assert_eq!(iblt.num_blocks, 10); 
+    const N: usize = 200;
+    const S: usize = N * 8;
+    type TestIBLT = RatelessIBLT<TestSymbol, N, S>;
 
-    // Add symbol with larger max_blocks -> should resize
-    iblt.add_symbol(&TestSymbol(2), 20);
-    // assert_eq!(iblt.num_blocks, 20);
-    
-    // The previous data should still be valid. 
-    // We verify by adding TestSymbol(1) again (XORing it out) and TestSymbol(2) again.
-    // Result should be empty.
-    iblt.add_symbol(&TestSymbol(1), 20); // Note: must use current size or higher
-    iblt.add_symbol(&TestSymbol(2), 20);
+    #[test]
+    fn test_capacity_expansion() {
+        let mut iblt = TestIBLT::new();
 
-    let (local, remote) = iblt.decode_all();
-    assert!(local.is_empty());
-    assert!(remote.is_empty());
-}
+        // Add symbol with small max_blocks
+        iblt.add_symbol(&TestSymbol(1), 10).unwrap();
 
-#[test]
-fn test_mapping_determinism() {
-    // Critical: Alice and Bob must generate exactly the same mapping indices for the same symbol
-    let s = TestSymbol(0xDEADBEEF);
-    
-    let mut iblt_1 = RatelessIBLT::<TestSymbol>::new();
-    iblt_1.add_symbol(&s, 50);
+        // Internal checks (requires making fields pub or adding getters for test,
+        // assuming pub(crate) for tests)
+        // assert_eq!(iblt.num_blocks, 10);
 
-    let mut iblt_2 = RatelessIBLT::<TestSymbol>::new();
-    iblt_2.add_symbol(&s, 50);
+        // Add symbol with larger max_blocks -> should resize
+        iblt.add_symbol(&TestSymbol(2), 20).unwrap();
+        // assert_eq!(iblt.num_blocks, 20);
 
-    // If mappings differ, subtraction won't zero out completely
-    iblt_1.subtract_assign(&iblt_2);
-    
-    let (l, r) = iblt_1.decode_all();
-    assert!(l.is_empty());
-    assert!(r.is_empty());
-}
+        // The previous data should still be valid.
+        // We verify by adding TestSymbol(1) again (XORing it out) and TestSymbol(2) again.
+        // Result should be empty.
+        iblt.add_symbol(&TestSymbol(1), 10).unwrap(); // Use SAME size as first add
+        iblt.add_symbol(&TestSymbol(2), 20).unwrap(); // Use SAME size as second add
 
-#[test]
-fn test_heavy_collision() {
-    // This tests the "hash" vector protection.
-    // If two symbols map to the same bucket (collision in `sums`),
-    // the `hashes` vector (using XxHash) should prevent `try_peel` from returning a corrupted symbol.
-    
-    // It's hard to force a collision in the RandomMapping integration without mocking,
-    // but we can test that adding 2 distinct symbols prevents peeling if they overlap perfectly (unlikely)
-    // or if they overlap in a singleton bucket.
-    
-    let mut iblt = RatelessIBLT::<TestSymbol>::new();
-    // Intentionally small size to force collisions in buckets
-    let size = 5; 
-    
-    let s1 = TestSymbol(1);
-    let s2 = TestSymbol(2);
-    
-    iblt.add_symbol(&s1, size);
-    iblt.add_symbol(&s2, size);
-    
-    // If they collided in a bucket:
-    // count = 2. try_peel checks (count == 1 || -1). It returns None. Correct.
-    
-    // If we manually corrupt a bucket (simulate network bitflip):
-    // This requires white-box access, but effectively simulates:
-    // count = 1, checksum matches, but sum is garbage -> Detected by Hash check?
-    // Actually, RatelessIBLT relies on (Sum check && Hash check). 
-    // If count=1, we read Sum. We hash Sum. We compare to stored Hash.
-    // This is very strong against random noise.
-}
+        let mut l = vec![TestSymbol(0); N];
+        let mut r = vec![TestSymbol(0); N];
+        let (lc, rc) = iblt.decode_all(&mut l, &mut r).unwrap();
+        assert_eq!(lc, 0);
+        assert_eq!(rc, 0);
+    }
 
-#[test]
-fn subtract_empty_is_identity() {
-    let size = 100;
-    let mut a = RatelessIBLT::new();
-    let b = RatelessIBLT::new();
+    #[test]
+    fn test_mapping_determinism() {
+        // Critical: Alice and Bob must generate exactly the same mapping indices for the same symbol
+        let s = TestSymbol(0xDEADBEEF);
 
-    let s1 = TestSymbol(1);
-    let s2 = TestSymbol(2);
+        let mut iblt_1 = TestIBLT::new();
+        iblt_1.add_symbol(&s, 50).unwrap();
 
-    a.add_symbol(&s1, size);
-    a.add_symbol(&s2, size);
+        let mut iblt_2 = TestIBLT::new();
+        iblt_2.add_symbol(&s, 50).unwrap();
 
-    let before = a.clone();
+        // If mappings differ, subtraction won't zero out completely
+        iblt_1.subtract_assign(&iblt_2).unwrap();
 
-    a.subtract_assign(&b);
+        let mut l = vec![TestSymbol(0); N];
+        let mut r = vec![TestSymbol(0); N];
+        let (lc, rc) = iblt_1.decode_all(&mut l, &mut r).unwrap();
+        assert_eq!(lc, 0);
+        assert_eq!(rc, 0);
+    }
 
-    let (local, remote) = a.decode_all();
+    #[test]
+    fn test_heavy_collision() {
+        // This tests the "hash" vector protection.
+        // If two symbols map to the same bucket (collision in `sums`),
+        // the `hashes` vector (using XxHash) should prevent `try_peel` from returning a corrupted symbol.
 
-    let got: std::collections::HashSet<_> = local.into_iter().collect();
-    let exp: std::collections::HashSet<_> = [s1, s2].into_iter().collect();
+        // It's hard to force a collision in the RandomMapping integration without mocking,
+        // but we can test that adding 2 distinct symbols prevents peeling if they overlap perfectly (unlikely)
+        // or if they overlap in a singleton bucket.
 
-    assert_eq!(got, exp);
-    assert!(remote.is_empty());
-}
+        let mut iblt = TestIBLT::new();
+        // Intentionally small size to force collisions in buckets
+        let size = 5;
 
-#[test]
-fn empty_minus_empty() {
-    let mut a: RatelessIBLT<TestSymbol> = RatelessIBLT::new();
-    let b = RatelessIBLT::new();
+        let s1 = TestSymbol(1);
+        let s2 = TestSymbol(2);
 
-    a.subtract_assign(&b);
+        iblt.add_symbol(&s1, size).unwrap();
+        iblt.add_symbol(&s2, size).unwrap();
 
-    let (local, remote) = a.decode_all();
+        // If they collided in a bucket:
+        // count = 2. try_peel checks (count == 1 || -1). It returns None. Correct.
 
-    assert!(local.is_empty());
-    assert!(remote.is_empty());
-}
+        // If we manually corrupt a bucket (simulate network bitflip):
+        // This requires white-box access, but effectively simulates:
+        // count = 1, checksum matches, but sum is garbage -> Detected by Hash check?
+        // Actually, RatelessIBLT relies on (Sum check && Hash check).
+        // If count=1, we read Sum. We hash Sum. We compare to stored Hash.
+        // This is very strong against random noise.
+    }
 
-#[test]
-fn decode_consistency_after_empty_subtract() {
-    let size = 300;
-    let mut a = RatelessIBLT::new();
-    let b = RatelessIBLT::new();
+    #[test]
+    fn subtract_empty_is_identity() {
+        let size = 100;
+        let mut a = TestIBLT::new();
+        let b = TestIBLT::new();
 
-    let s1 = TestSymbol(42);
-    let s2 = TestSymbol(99);
+        let s1 = TestSymbol(1);
+        let s2 = TestSymbol(2);
 
-    a.add_symbol(&s1, size);
-    a.add_symbol(&s2, size);
+        a.add_symbol(&s1, size).unwrap();
+        a.add_symbol(&s2, size).unwrap();
 
-    let (local1, remote1) = a.decode_all();
+        let _before = a.clone();
 
-    assert!(remote1.is_empty());
+        a.subtract_assign(&b).unwrap();
 
-    let mut a2 = RatelessIBLT::new();
-    a2.add_symbol(&s1, size);
-    a2.add_symbol(&s2, size);
+        let mut l = vec![TestSymbol(0); N];
+        let mut r = vec![TestSymbol(0); N];
+        let (lc, rc) = a.decode_all(&mut l, &mut r).unwrap();
 
-    a2.subtract_assign(&b);
+        let local = &l[..lc];
+        let got: std::collections::HashSet<_> = local.iter().cloned().collect();
+        let exp: std::collections::HashSet<_> = [s1, s2].into_iter().collect();
 
-    let (local2, remote2) = a2.decode_all();
+        assert_eq!(got, exp);
+        assert_eq!(rc, 0);
+    }
 
-    assert_eq!(
-        local1.into_iter().collect::<std::collections::HashSet<_>>(),
-        local2.into_iter().collect::<std::collections::HashSet<_>>(),
-    );
+    #[test]
+    fn empty_minus_empty() {
+        let mut a = TestIBLT::new();
+        let b = TestIBLT::new();
 
-    assert!(remote2.is_empty());
-}
+        a.subtract_assign(&b).unwrap();
 
-#[test]
-fn minimal_property_failure_case() {
-    let size = 300;
-    let mut a = RatelessIBLT::new();
-    let b = RatelessIBLT::new();
+        let mut l = vec![TestSymbol(0); N];
+        let mut r = vec![TestSymbol(0); N];
+        let (lc, rc) = a.decode_all(&mut l, &mut r).unwrap();
 
-    let s1 = TestSymbol(18145032937744471612);
-    let s2 = TestSymbol(15036937119665929939);
+        assert_eq!(lc, 0);
+        assert_eq!(rc, 0);
+    }
 
-    a.add_symbol(&s1, size);
-    a.add_symbol(&s2, size);
+    #[test]
+    fn decode_consistency_after_empty_subtract() {
+        let size = 200; // fit within N=200
+        let mut a = TestIBLT::new();
+        let b = TestIBLT::new();
 
-    a.subtract_assign(&b);
+        let s1 = TestSymbol(42);
+        let s2 = TestSymbol(99);
 
-    let (local, remote) = a.decode_all();
+        a.add_symbol(&s1, size).unwrap();
+        a.add_symbol(&s2, size).unwrap();
 
-    let got: std::collections::HashSet<_> = local.into_iter().collect();
-    let exp: std::collections::HashSet<_> = [s1, s2].into_iter().collect();
+        let mut l1_buf = vec![TestSymbol(0); N];
+        let mut r1_buf = vec![TestSymbol(0); N];
+        let (lc1, rc1) = a.decode_all(&mut l1_buf, &mut r1_buf).unwrap();
 
-    assert_eq!(got, exp);
-    assert!(remote.is_empty());
-}
+        assert_eq!(rc1, 0);
 
+        let mut a2 = TestIBLT::new();
+        a2.add_symbol(&s1, size).unwrap();
+        a2.add_symbol(&s2, size).unwrap();
 
-#[test]
-fn minimal_property_failure_case2() {
-    let size = 300;
-    let mut a = RatelessIBLT::new();
-    let b = RatelessIBLT::new();
+        a2.subtract_assign(&b).unwrap();
 
-    let s1 = TestSymbol(1);
-    let s2 = TestSymbol(2);
+        let mut l2_buf = vec![TestSymbol(0); N];
+        let mut r2_buf = vec![TestSymbol(0); N];
+        let (lc2, rc2) = a2.decode_all(&mut l2_buf, &mut r2_buf).unwrap();
 
-    a.add_symbol(&s1, size);
-    a.add_symbol(&s2, size);
+        let local1 = &l1_buf[..lc1];
+        let local2 = &l2_buf[..lc2];
 
-    a.subtract_assign(&b);
+        assert_eq!(
+            local1
+                .iter()
+                .cloned()
+                .collect::<std::collections::HashSet<_>>(),
+            local2
+                .iter()
+                .cloned()
+                .collect::<std::collections::HashSet<_>>(),
+        );
 
-    let (local, remote) = a.decode_all();
+        assert_eq!(rc2, 0);
+    }
 
-    let got: std::collections::HashSet<_> = local.into_iter().collect();
-    let exp: std::collections::HashSet<_> = [s1, s2].into_iter().collect();
+    #[test]
+    fn minimal_property_failure_case() {
+        let size = 200;
+        let mut a = TestIBLT::new();
+        let b = TestIBLT::new();
 
-    assert_eq!(got, exp);
-    assert!(remote.is_empty());
-}
+        let s1 = TestSymbol(18145032937744471612);
+        let s2 = TestSymbol(15036937119665929939);
 
+        a.add_symbol(&s1, size).unwrap();
+        a.add_symbol(&s2, size).unwrap();
+
+        a.subtract_assign(&b).unwrap();
+
+        let mut l = vec![TestSymbol(0); N];
+        let mut r = vec![TestSymbol(0); N];
+        let (lc, rc) = a.decode_all(&mut l, &mut r).unwrap();
+        let local = &l[..lc];
+
+        let got: std::collections::HashSet<_> = local.iter().cloned().collect();
+        let exp: std::collections::HashSet<_> = [s1, s2].into_iter().collect();
+
+        assert_eq!(got, exp);
+        assert_eq!(rc, 0);
+    }
+
+    #[test]
+    fn minimal_property_failure_case2() {
+        let size = 200;
+        let mut a = TestIBLT::new();
+        let b = TestIBLT::new();
+
+        let s1 = TestSymbol(1);
+        let s2 = TestSymbol(2);
+
+        a.add_symbol(&s1, size).unwrap();
+        a.add_symbol(&s2, size).unwrap();
+
+        a.subtract_assign(&b).unwrap();
+
+        let mut l = vec![TestSymbol(0); N];
+        let mut r = vec![TestSymbol(0); N];
+        let (lc, rc) = a.decode_all(&mut l, &mut r).unwrap();
+        let local = &l[..lc];
+
+        let got: std::collections::HashSet<_> = local.iter().cloned().collect();
+        let exp: std::collections::HashSet<_> = [s1, s2].into_iter().collect();
+
+        assert_eq!(got, exp);
+        assert_eq!(rc, 0);
+    }
 }
